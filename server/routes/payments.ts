@@ -54,6 +54,14 @@ function piToCharge(pi: PaymentIntent) {
   }
 }
 
+// Inject amount_received so the frontend totalSpent computed always has a value
+function withAmountReceived(pi: PaymentIntent) {
+  return {
+    ...pi,
+    amount_received: pi.status === 'succeeded' ? pi.amount : 0,
+  }
+}
+
 // ─── Payment Intents ──────────────────────────────────────────────────────────
 
 const piRouter = new Hono()
@@ -74,7 +82,7 @@ piRouter.get('/', (c) => {
     results = results.filter((pi) => pi.customer === customer)
   }
 
-  return c.json(listResponse(results, limit))
+  return c.json(listResponse(results.map(withAmountReceived), limit))
 })
 
 // POST / - create payment intent
@@ -105,7 +113,7 @@ piRouter.post('/', async (c) => {
   }
 
   paymentIntents.unshift(newPI)
-  return c.json(newPI, 201)
+  return c.json(withAmountReceived(newPI), 201)
 })
 
 // GET /:id - get single payment intent
@@ -117,7 +125,7 @@ piRouter.get('/:id', (c) => {
     return c.json({ error: { message: `No such payment_intent: '${id}'`, type: 'invalid_request_error', code: 'resource_missing' } }, 404)
   }
 
-  return c.json(pi)
+  return c.json(withAmountReceived(pi))
 })
 
 // POST /:id - update payment intent

@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   customersApi,
+  subscriptionsApi,
+  invoicesApi,
+  paymentsApi,
   type Customer,
   type PaymentIntent,
   type Subscription,
@@ -29,6 +32,23 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogDescription,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
   ChevronDown,
@@ -36,15 +56,15 @@ import {
   Edit2,
   X,
   MoreHorizontal,
-  Plus,
   CreditCard,
   ArrowLeft,
 } from 'lucide-vue-next'
 import { RouterLink } from 'vue-router'
 
-// ── Route ─────────────────────────────────────────────────────────────────────
+// ── Route & Router ────────────────────────────────────────────────────────────
 
 const route = useRoute()
+const router = useRouter()
 const customerId = route.params.id as string
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -68,6 +88,47 @@ const expandedPaymentMethods = ref<Set<string>>(new Set())
 
 // Selected payments (checkboxes)
 const selectedPayments = ref<Set<string>>(new Set())
+
+// ── Dialog open state ─────────────────────────────────────────────────────────
+
+const createSubOpen = ref(false)
+const createPaymentOpen = ref(false)
+const addPmOpen = ref(false)
+const adjustBalanceOpen = ref(false)
+const createInvoiceOpen = ref(false)
+
+// ── Dialog submitting state ───────────────────────────────────────────────────
+
+const subSubmitting = ref(false)
+const paymentSubmitting = ref(false)
+const pmSubmitting = ref(false)
+const balanceSubmitting = ref(false)
+const invoiceSubmitting = ref(false)
+
+// ── Dialog form state ─────────────────────────────────────────────────────────
+
+// Create subscription
+const selectedPlan = ref('')
+const trialDays = ref(false)
+
+// Create payment
+const paymentAmount = ref<number | undefined>(undefined)
+const paymentDescription = ref('')
+
+// Add payment method
+const cardNumber = ref('')
+const cardExpiry = ref('')
+const cardCvc = ref('')
+const cardName = ref('')
+
+// Adjust balance
+const balanceAmount = ref<number | undefined>(undefined)
+const balanceDescription = ref('')
+
+// Create invoice
+const invoiceDescription = ref('')
+const invoiceAmount = ref<number | undefined>(undefined)
+const invoiceDueDate = ref('')
 
 // ── Data fetching ─────────────────────────────────────────────────────────────
 
@@ -207,6 +268,151 @@ function togglePaymentSelect(id: string) {
 function isDefaultPaymentMethod(pm: PaymentMethod): boolean {
   return customer.value?.default_source === pm.id
 }
+
+function formatCardNumber(e: Event) {
+  const input = e.target as HTMLInputElement
+  const digits = input.value.replace(/\D/g, '').slice(0, 16)
+  cardNumber.value = digits.replace(/(.{4})/g, '$1 ').trim()
+}
+
+// ── Dialog action handlers ────────────────────────────────────────────────────
+
+async function handleCreateSubscription() {
+  if (!selectedPlan.value) return
+  subSubmitting.value = true
+  try {
+    const trialEnd = trialDays.value
+      ? Math.floor(Date.now() / 1000) + 14 * 86400
+      : undefined
+    const newSub = await subscriptionsApi.create({
+      customer: customerId,
+      items: [{ price: selectedPlan.value }],
+      ...(trialEnd ? { trial_end: trialEnd } : {}),
+    })
+    subscriptions.value = [newSub, ...subscriptions.value]
+    createSubOpen.value = false
+    selectedPlan.value = ''
+    trialDays.value = false
+  } catch (err) {
+    console.error('Failed to create subscription:', err)
+  } finally {
+    subSubmitting.value = false
+  }
+}
+
+async function handleCreatePayment() {
+  if (!paymentAmount.value || paymentAmount.value <= 0) return
+  paymentSubmitting.value = true
+  try {
+    const newPayment = await paymentsApi.create({
+      customer: customerId,
+      amount: Math.round(paymentAmount.value * 100),
+      currency: defaultCurrency.value ?? 'usd',
+      description: paymentDescription.value || undefined,
+    })
+    payments.value = [newPayment, ...payments.value]
+    createPaymentOpen.value = false
+    paymentAmount.value = undefined
+    paymentDescription.value = ''
+  } catch (err) {
+    console.error('Failed to create payment:', err)
+  } finally {
+    paymentSubmitting.value = false
+  }
+}
+
+function handleAddPaymentMethod() {
+  const digits = cardNumber.value.replace(/\s/g, '')
+  if (digits.length < 4) return
+  pmSubmitting.value = true
+  try {
+    const last4 = digits.slice(-4)
+    const fakePm: PaymentMethod = {
+      id: `pm_simulated_${Date.now()}`,
+      object: 'payment_method',
+      type: 'card',
+      card: {
+        brand: 'visa',
+        last4,
+        exp_month: parseInt(cardExpiry.value.split('/')[0] ?? '12', 10) || 12,
+        exp_year: parseInt(cardExpiry.value.split('/')[1] ?? '99', 10) + 2000,
+        country: null,
+        funding: 'credit',
+      },
+      customer: customerId,
+      created: Math.floor(Date.now() / 1000),
+      livemode: false,
+      metadata: {},
+    }
+    paymentMethods.value = [...paymentMethods.value, fakePm]
+    addPmOpen.value = false
+    cardNumber.value = ''
+    cardExpiry.value = ''
+    cardCvc.value = ''
+    cardName.value = ''
+  } finally {
+    pmSubmitting.value = false
+  }
+}
+
+async function handleAdjustBalance() {
+  if (!customer.value || balanceAmount.value === undefined) return
+  balanceSubmitting.value = true
+  try {
+    const newBalance = customer.value.balance + Math.round(balanceAmount.value * 100)
+    const updated = await customersApi.update(customerId, { balance: newBalance })
+    customer.value = updated
+    adjustBalanceOpen.value = false
+    balanceAmount.value = undefined
+    balanceDescription.value = ''
+  } catch (err) {
+    console.error('Failed to adjust balance:', err)
+  } finally {
+    balanceSubmitting.value = false
+  }
+}
+
+async function handleCreateInvoice() {
+  invoiceSubmitting.value = true
+  try {
+    const newInvoice = await invoicesApi.create({
+      customer: customerId,
+      description: invoiceDescription.value || undefined,
+    })
+    invoices.value = [newInvoice, ...invoices.value]
+    createInvoiceOpen.value = false
+    invoiceDescription.value = ''
+    invoiceAmount.value = undefined
+    invoiceDueDate.value = ''
+  } catch (err) {
+    console.error('Failed to create invoice:', err)
+  } finally {
+    invoiceSubmitting.value = false
+  }
+}
+
+async function handleCancelSubscription(subId: string) {
+  try {
+    await subscriptionsApi.cancel(subId)
+    const refreshed = await customersApi.getSubscriptions(customerId)
+    subscriptions.value = refreshed.data
+  } catch (err) {
+    console.error('Failed to cancel subscription:', err)
+  }
+}
+
+async function handleSetDefaultPaymentMethod(pm: PaymentMethod) {
+  try {
+    const updated = await customersApi.update(customerId, { default_source: pm.id })
+    customer.value = updated
+  } catch (err) {
+    console.error('Failed to set default payment method:', err)
+  }
+}
+
+function handleRemovePaymentMethod(pmId: string) {
+  paymentMethods.value = paymentMethods.value.filter((pm) => pm.id !== pmId)
+}
 </script>
 
 <template>
@@ -281,9 +487,9 @@ function isDefaultPaymentMethod(pm: PaymentMethod): boolean {
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" class="w-48">
           <DropdownMenuItem>Edit customer</DropdownMenuItem>
-          <DropdownMenuItem>Create payment</DropdownMenuItem>
-          <DropdownMenuItem>Create subscription</DropdownMenuItem>
-          <DropdownMenuItem>Create invoice</DropdownMenuItem>
+          <DropdownMenuItem @click="createPaymentOpen = true">Create payment</DropdownMenuItem>
+          <DropdownMenuItem @click="createSubOpen = true">Create subscription</DropdownMenuItem>
+          <DropdownMenuItem @click="createInvoiceOpen = true">Create invoice</DropdownMenuItem>
           <DropdownMenuItem class="text-destructive focus:text-destructive">
             Delete customer
           </DropdownMenuItem>
@@ -439,7 +645,7 @@ function isDefaultPaymentMethod(pm: PaymentMethod): boolean {
             <div class="rounded-lg border bg-card shadow-xs">
               <div class="flex items-center justify-between px-4 py-3 border-b">
                 <h3 class="text-sm font-semibold text-foreground">Subscriptions</h3>
-                <RouterLink to="#" class="text-primary text-sm hover:underline">+ Create</RouterLink>
+                <button class="text-primary text-sm hover:underline" @click="createSubOpen = true">+ Create</button>
               </div>
 
               <div v-if="subscriptions.length === 0" class="px-4 py-6 text-sm text-muted-foreground text-center">
@@ -477,7 +683,12 @@ function isDefaultPaymentMethod(pm: PaymentMethod): boolean {
                   <Button variant="ghost" size="icon" class="size-7">
                     <Edit2 class="size-3.5" />
                   </Button>
-                  <Button variant="ghost" size="icon" class="size-7 text-muted-foreground hover:text-destructive">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="size-7 text-muted-foreground hover:text-destructive"
+                    @click="handleCancelSubscription(sub.id)"
+                  >
                     <X class="size-3.5" />
                   </Button>
                   <DropdownMenu>
@@ -487,10 +698,15 @@ function isDefaultPaymentMethod(pm: PaymentMethod): boolean {
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
-                      <DropdownMenuItem>View subscription</DropdownMenuItem>
+                      <DropdownMenuItem @click="router.push('/subscriptions/' + sub.id)">
+                        View subscription
+                      </DropdownMenuItem>
                       <DropdownMenuItem>Edit subscription</DropdownMenuItem>
                       <DropdownMenuItem>Pause subscription</DropdownMenuItem>
-                      <DropdownMenuItem class="text-destructive focus:text-destructive">
+                      <DropdownMenuItem
+                        class="text-destructive focus:text-destructive"
+                        @click="handleCancelSubscription(sub.id)"
+                      >
                         Cancel subscription
                       </DropdownMenuItem>
                     </DropdownMenuContent>
@@ -505,7 +721,7 @@ function isDefaultPaymentMethod(pm: PaymentMethod): boolean {
                 <h3 class="text-sm font-semibold text-foreground">Payments</h3>
                 <div class="flex items-center gap-3">
                   <RouterLink to="/payments" class="text-primary text-sm hover:underline">View all</RouterLink>
-                  <RouterLink to="#" class="text-primary text-sm hover:underline">+ Create</RouterLink>
+                  <button class="text-primary text-sm hover:underline" @click="createPaymentOpen = true">+ Create</button>
                 </div>
               </div>
 
@@ -594,7 +810,7 @@ function isDefaultPaymentMethod(pm: PaymentMethod): boolean {
             <div class="rounded-lg border bg-card shadow-xs">
               <div class="flex items-center justify-between px-4 py-3 border-b">
                 <h3 class="text-sm font-semibold text-foreground">Payment methods</h3>
-                <RouterLink to="#" class="text-primary text-sm hover:underline">+ Add</RouterLink>
+                <button class="text-primary text-sm hover:underline" @click="addPmOpen = true">+ Add</button>
               </div>
 
               <div v-if="paymentMethods.length === 0" class="px-4 py-6 text-sm text-muted-foreground text-center">
@@ -647,7 +863,12 @@ function isDefaultPaymentMethod(pm: PaymentMethod): boolean {
                       <Button variant="ghost" size="icon" class="size-7">
                         <Edit2 class="size-3.5" />
                       </Button>
-                      <Button variant="ghost" size="icon" class="size-7 text-muted-foreground hover:text-destructive">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        class="size-7 text-muted-foreground hover:text-destructive"
+                        @click="handleRemovePaymentMethod(pm.id)"
+                      >
                         <X class="size-3.5" />
                       </Button>
                       <DropdownMenu>
@@ -657,9 +878,14 @@ function isDefaultPaymentMethod(pm: PaymentMethod): boolean {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                          <DropdownMenuItem>Set as default</DropdownMenuItem>
+                          <DropdownMenuItem @click="handleSetDefaultPaymentMethod(pm)">
+                            Set as default
+                          </DropdownMenuItem>
                           <DropdownMenuItem>Edit</DropdownMenuItem>
-                          <DropdownMenuItem class="text-destructive focus:text-destructive">
+                          <DropdownMenuItem
+                            class="text-destructive focus:text-destructive"
+                            @click="handleRemovePaymentMethod(pm.id)"
+                          >
                             Remove
                           </DropdownMenuItem>
                         </DropdownMenuContent>
@@ -707,7 +933,7 @@ function isDefaultPaymentMethod(pm: PaymentMethod): boolean {
             <div class="rounded-lg border bg-card shadow-xs">
               <div class="flex items-center justify-between px-4 py-3 border-b">
                 <h3 class="text-sm font-semibold text-foreground">Credit balance</h3>
-                <RouterLink to="#" class="text-primary text-sm hover:underline">Adjust balance</RouterLink>
+                <button class="text-primary text-sm hover:underline" @click="adjustBalanceOpen = true">Adjust balance</button>
               </div>
               <div class="flex items-center gap-2 px-4 py-3">
                 <span class="text-lg font-bold text-foreground">
@@ -725,7 +951,7 @@ function isDefaultPaymentMethod(pm: PaymentMethod): boolean {
                 <h3 class="text-sm font-semibold text-foreground">Invoices</h3>
                 <div class="flex items-center gap-3">
                   <RouterLink to="/invoices" class="text-primary text-sm hover:underline">View all</RouterLink>
-                  <RouterLink to="#" class="text-primary text-sm hover:underline">+ Create</RouterLink>
+                  <button class="text-primary text-sm hover:underline" @click="createInvoiceOpen = true">+ Create</button>
                 </div>
               </div>
 
@@ -810,5 +1036,230 @@ function isDefaultPaymentMethod(pm: PaymentMethod): boolean {
         </Tabs>
       </div>
     </div>
+
+    <!-- ── Dialogs ─────────────────────────────────────────────────────────── -->
+
+    <!-- 1. Create Subscription Dialog -->
+    <Dialog v-model:open="createSubOpen">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Create subscription</DialogTitle>
+          <DialogDescription>Choose a plan to subscribe this customer to.</DialogDescription>
+        </DialogHeader>
+        <div class="flex flex-col gap-4 py-2">
+          <div class="flex flex-col gap-1.5">
+            <Label for="plan-select">Plan</Label>
+            <Select v-model="selectedPlan">
+              <SelectTrigger id="plan-select" class="w-full">
+                <SelectValue placeholder="Select a plan" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="price_basic_999">Basic Plan — $9.99/month</SelectItem>
+                <SelectItem value="price_pro_2999">Pro Plan — $29.99/month</SelectItem>
+                <SelectItem value="price_enterprise_9999">Enterprise — $99.99/month</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div class="flex items-center gap-2">
+            <Checkbox id="trial-days" :checked="trialDays" @update:checked="(v: boolean) => (trialDays = v)" />
+            <Label for="trial-days" class="cursor-pointer">Start with 14-day free trial</Label>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="createSubOpen = false">Cancel</Button>
+          <Button :disabled="!selectedPlan || subSubmitting" @click="handleCreateSubscription">
+            {{ subSubmitting ? 'Creating…' : 'Create subscription' }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- 2. Create Payment Dialog -->
+    <Dialog v-model:open="createPaymentOpen">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Create payment</DialogTitle>
+          <DialogDescription>Create a new payment intent for this customer.</DialogDescription>
+        </DialogHeader>
+        <div class="flex flex-col gap-4 py-2">
+          <div class="flex flex-col gap-1.5">
+            <Label for="payment-amount">Amount ({{ (defaultCurrency ?? 'usd').toUpperCase() }})</Label>
+            <Input
+              id="payment-amount"
+              v-model.number="paymentAmount"
+              type="number"
+              min="0.01"
+              step="0.01"
+              placeholder="0.00"
+            />
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <Label for="payment-desc">Description <span class="text-muted-foreground font-normal">(optional)</span></Label>
+            <Input
+              id="payment-desc"
+              v-model="paymentDescription"
+              type="text"
+              placeholder="e.g. One-time purchase"
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="createPaymentOpen = false">Cancel</Button>
+          <Button :disabled="!paymentAmount || paymentAmount <= 0 || paymentSubmitting" @click="handleCreatePayment">
+            {{ paymentSubmitting ? 'Creating…' : 'Create payment' }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- 3. Add Payment Method Dialog -->
+    <Dialog v-model:open="addPmOpen">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Add payment method</DialogTitle>
+          <DialogDescription>Enter card details to add a new payment method.</DialogDescription>
+        </DialogHeader>
+        <div class="flex flex-col gap-4 py-2">
+          <div class="flex flex-col gap-1.5">
+            <Label for="card-name">Name on card</Label>
+            <Input
+              id="card-name"
+              v-model="cardName"
+              type="text"
+              placeholder="Jane Doe"
+            />
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <Label for="card-number">Card number</Label>
+            <Input
+              id="card-number"
+              :value="cardNumber"
+              type="text"
+              maxlength="19"
+              placeholder="1234 5678 9012 3456"
+              @input="formatCardNumber"
+            />
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div class="flex flex-col gap-1.5">
+              <Label for="card-expiry">Expiry (MM/YY)</Label>
+              <Input
+                id="card-expiry"
+                v-model="cardExpiry"
+                type="text"
+                maxlength="5"
+                placeholder="MM/YY"
+              />
+            </div>
+            <div class="flex flex-col gap-1.5">
+              <Label for="card-cvc">CVC</Label>
+              <Input
+                id="card-cvc"
+                v-model="cardCvc"
+                type="text"
+                maxlength="4"
+                placeholder="123"
+              />
+            </div>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="addPmOpen = false">Cancel</Button>
+          <Button
+            :disabled="cardNumber.replace(/\s/g, '').length < 4 || !cardExpiry || !cardCvc || pmSubmitting"
+            @click="handleAddPaymentMethod"
+          >
+            {{ pmSubmitting ? 'Adding…' : 'Add card' }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- 4. Adjust Balance Dialog -->
+    <Dialog v-model:open="adjustBalanceOpen">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Adjust credit balance</DialogTitle>
+          <DialogDescription>
+            Enter a positive amount to add credit, or a negative amount to deduct it.
+            Current balance: {{ formatCurrency(Math.abs(customer.balance), customer.currency ?? 'usd') }}.
+          </DialogDescription>
+        </DialogHeader>
+        <div class="flex flex-col gap-4 py-2">
+          <div class="flex flex-col gap-1.5">
+            <Label for="balance-amount">Amount ({{ (customer.currency ?? 'usd').toUpperCase() }})</Label>
+            <Input
+              id="balance-amount"
+              v-model.number="balanceAmount"
+              type="number"
+              step="0.01"
+              placeholder="e.g. 10.00 or -5.00"
+            />
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <Label for="balance-desc">Description <span class="text-muted-foreground font-normal">(optional)</span></Label>
+            <Input
+              id="balance-desc"
+              v-model="balanceDescription"
+              type="text"
+              placeholder="Reason for adjustment"
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="adjustBalanceOpen = false">Cancel</Button>
+          <Button :disabled="balanceAmount === undefined || balanceSubmitting" @click="handleAdjustBalance">
+            {{ balanceSubmitting ? 'Saving…' : 'Apply adjustment' }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- 5. Create Invoice Dialog -->
+    <Dialog v-model:open="createInvoiceOpen">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Create invoice</DialogTitle>
+          <DialogDescription>Create a new draft invoice for this customer.</DialogDescription>
+        </DialogHeader>
+        <div class="flex flex-col gap-4 py-2">
+          <div class="flex flex-col gap-1.5">
+            <Label for="invoice-desc">Description <span class="text-muted-foreground font-normal">(optional)</span></Label>
+            <Input
+              id="invoice-desc"
+              v-model="invoiceDescription"
+              type="text"
+              placeholder="e.g. Professional services"
+            />
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <Label for="invoice-amount">Amount (USD) <span class="text-muted-foreground font-normal">(optional)</span></Label>
+            <Input
+              id="invoice-amount"
+              v-model.number="invoiceAmount"
+              type="number"
+              min="0.01"
+              step="0.01"
+              placeholder="0.00"
+            />
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <Label for="invoice-due">Due date <span class="text-muted-foreground font-normal">(optional)</span></Label>
+            <Input
+              id="invoice-due"
+              v-model="invoiceDueDate"
+              type="date"
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="createInvoiceOpen = false">Cancel</Button>
+          <Button :disabled="invoiceSubmitting" @click="handleCreateInvoice">
+            {{ invoiceSubmitting ? 'Creating…' : 'Create invoice' }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
   </div>
 </template>

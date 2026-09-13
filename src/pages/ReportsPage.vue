@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { Bar } from 'vue-chartjs'
 import {
   Chart as ChartJS,
@@ -17,6 +17,8 @@ import {
   Receipt,
   ChevronDown,
   ArrowRight,
+  X,
+  Loader2,
 } from 'lucide-vue-next'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -26,6 +28,9 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { paymentsApi, customersApi, balanceApi } from '@/lib/api'
+import type { PaymentIntent, BalanceTransaction, Customer } from '@/lib/api'
+import { formatCurrency, formatDate } from '@/lib/utils'
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Title, ChartTooltip, Legend)
 
@@ -143,6 +148,108 @@ const totalRevenue = computed(() =>
     currency: 'USD',
   }),
 )
+
+// ─── CSV Export ───────────────────────────────────────────────────────────────
+
+const exportLoading = ref<string | null>(null)
+
+function downloadCsv(filename: string, headers: string[], rows: string[][]) {
+  const escape = (v: string) => `"${v.replace(/"/g, '""')}"`
+  const content = [headers, ...rows].map(r => r.map(escape).join(',')).join('\n')
+  const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
+async function exportTransactions() {
+  exportLoading.value = 'transactions'
+  try {
+    const result = await paymentsApi.list({ limit: 100 })
+    const rows = result.data.map((p: PaymentIntent) => [
+      p.id,
+      String(p.amount / 100),
+      p.currency,
+      p.status,
+      p.description ?? '',
+      formatDate(p.created),
+    ])
+    downloadCsv('transactions.csv', ['ID', 'Amount', 'Currency', 'Status', 'Description', 'Date'], rows)
+  } finally {
+    exportLoading.value = null
+  }
+}
+
+async function exportPayouts() {
+  exportLoading.value = 'payouts'
+  try {
+    const result = await balanceApi.getHistory()
+    const rows = result.data.map((t: BalanceTransaction) => [
+      t.id,
+      t.type,
+      String(t.amount / 100),
+      t.currency,
+      t.description ?? '',
+      formatDate(t.created),
+    ])
+    downloadCsv('payouts.csv', ['ID', 'Type', 'Amount', 'Currency', 'Description', 'Date'], rows)
+  } finally {
+    exportLoading.value = null
+  }
+}
+
+async function exportCustomers() {
+  exportLoading.value = 'customers'
+  try {
+    const result = await customersApi.list({ limit: 100 })
+    const rows = result.data.map((c: Customer) => [
+      c.id,
+      c.name ?? '',
+      c.email ?? '',
+      c.phone ?? '',
+      formatDate(c.created),
+    ])
+    downloadCsv('customers.csv', ['ID', 'Name', 'Email', 'Phone', 'Created'], rows)
+  } finally {
+    exportLoading.value = null
+  }
+}
+
+// ─── View report ──────────────────────────────────────────────────────────────
+
+const activeReport = ref<string | null>(null)
+const reportPayments = ref<PaymentIntent[]>([])
+const reportPayouts = ref<BalanceTransaction[]>([])
+
+const taxRows = [
+  { state: 'California', rate: '8.5%', collected: '$312.40' },
+  { state: 'New York', rate: '8.875%', collected: '$187.20' },
+  { state: 'Texas', rate: '6.25%', collected: '$89.40' },
+  { state: 'Washington', rate: '10.25%', collected: '$156.80' },
+]
+
+watch(activeReport, async (id) => {
+  if (id === 'transactions') {
+    try {
+      const result = await paymentsApi.list({ limit: 20 })
+      reportPayments.value = result.data
+    } catch {
+      reportPayments.value = []
+    }
+  } else if (id === 'payout') {
+    try {
+      const result = await balanceApi.getHistory()
+      reportPayouts.value = result.data
+    } catch {
+      reportPayouts.value = []
+    }
+  }
+})
 </script>
 
 <template>
@@ -181,6 +288,8 @@ const totalRevenue = computed(() =>
         v-for="report in reportCategories"
         :key="report.id"
         class="hover:shadow-md transition-shadow cursor-pointer group"
+        :class="activeReport === report.id ? 'ring-2 ring-blue-500' : ''"
+        @click="activeReport = activeReport === report.id ? null : report.id"
       >
         <CardHeader class="pb-3">
           <div
@@ -193,13 +302,158 @@ const totalRevenue = computed(() =>
           <CardDescription class="text-xs">{{ report.description }}</CardDescription>
         </CardHeader>
         <CardContent class="pt-0">
-          <Button variant="ghost" size="sm" class="gap-1 text-xs px-0 h-auto text-blue-600 hover:text-blue-700 hover:bg-transparent group-hover:underline">
+          <Button
+            variant="ghost"
+            size="sm"
+            class="gap-1 text-xs px-0 h-auto text-blue-600 hover:text-blue-700 hover:bg-transparent group-hover:underline"
+          >
             View report
             <ArrowRight class="h-3 w-3" />
           </Button>
         </CardContent>
       </Card>
     </div>
+
+    <!-- Active report detail table -->
+    <Card v-if="activeReport !== null">
+      <CardHeader class="pb-3">
+        <div class="flex items-center justify-between">
+          <CardTitle class="text-base font-semibold">
+            <span v-if="activeReport === 'revenue'">Monthly Revenue Breakdown</span>
+            <span v-else-if="activeReport === 'payout'">Balance History</span>
+            <span v-else-if="activeReport === 'transactions'">Recent Transactions</span>
+            <span v-else-if="activeReport === 'tax'">Tax by Jurisdiction</span>
+          </CardTitle>
+          <Button variant="ghost" size="sm" class="h-7 w-7 p-0" @click="activeReport = null">
+            <X class="h-4 w-4" />
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+
+        <!-- Revenue breakdown -->
+        <div v-if="activeReport === 'revenue'" class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-border">
+                <th class="text-left pb-2.5 text-xs font-medium text-muted-foreground">Month</th>
+                <th class="text-right pb-2.5 text-xs font-medium text-muted-foreground">Gross</th>
+                <th class="text-right pb-2.5 text-xs font-medium text-muted-foreground">Fees (5%)</th>
+                <th class="text-right pb-2.5 text-xs font-medium text-muted-foreground">Net</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="(gross, i) in monthlyRevenue"
+                :key="i"
+                class="border-b border-border last:border-0 hover:bg-muted/30"
+              >
+                <td class="py-2.5 text-foreground">{{ monthlyLabels[i] }}</td>
+                <td class="py-2.5 text-right text-foreground">${{ gross.toLocaleString() }}</td>
+                <td class="py-2.5 text-right text-muted-foreground">${{ Math.round(gross * 0.05).toLocaleString() }}</td>
+                <td class="py-2.5 text-right text-foreground">${{ Math.round(gross * 0.95).toLocaleString() }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Balance / payout history -->
+        <div v-else-if="activeReport === 'payout'" class="overflow-x-auto">
+          <div v-if="reportPayouts.length === 0" class="py-8 text-center text-sm text-muted-foreground">
+            No payout history available.
+          </div>
+          <table v-else class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-border">
+                <th class="text-left pb-2.5 text-xs font-medium text-muted-foreground">Date</th>
+                <th class="text-left pb-2.5 text-xs font-medium text-muted-foreground">Description</th>
+                <th class="text-left pb-2.5 text-xs font-medium text-muted-foreground">Type</th>
+                <th class="text-right pb-2.5 text-xs font-medium text-muted-foreground">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="txn in reportPayouts"
+                :key="txn.id"
+                class="border-b border-border last:border-0 hover:bg-muted/30"
+              >
+                <td class="py-2.5 text-foreground whitespace-nowrap">{{ formatDate(txn.created) }}</td>
+                <td class="py-2.5 text-muted-foreground max-w-xs truncate">{{ txn.description ?? '—' }}</td>
+                <td class="py-2.5 text-muted-foreground capitalize">{{ txn.type }}</td>
+                <td class="py-2.5 text-right text-foreground">{{ formatCurrency(txn.amount, txn.currency) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Recent transactions -->
+        <div v-else-if="activeReport === 'transactions'" class="overflow-x-auto">
+          <div v-if="reportPayments.length === 0" class="py-8 text-center text-sm text-muted-foreground">
+            No transactions available.
+          </div>
+          <table v-else class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-border">
+                <th class="text-left pb-2.5 text-xs font-medium text-muted-foreground">ID</th>
+                <th class="text-right pb-2.5 text-xs font-medium text-muted-foreground">Amount</th>
+                <th class="text-left pb-2.5 text-xs font-medium text-muted-foreground">Status</th>
+                <th class="text-left pb-2.5 text-xs font-medium text-muted-foreground">Date</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="payment in reportPayments"
+                :key="payment.id"
+                class="border-b border-border last:border-0 hover:bg-muted/30"
+              >
+                <td class="py-2.5 font-mono text-xs text-muted-foreground">{{ payment.id }}</td>
+                <td class="py-2.5 text-right text-foreground">{{ formatCurrency(payment.amount, payment.currency) }}</td>
+                <td class="py-2.5">
+                  <span
+                    class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium"
+                    :class="
+                      payment.status === 'succeeded'
+                        ? 'bg-green-100 text-green-700'
+                        : payment.status === 'processing'
+                          ? 'bg-yellow-100 text-yellow-700'
+                          : 'bg-red-100 text-red-700'
+                    "
+                  >
+                    {{ payment.status }}
+                  </span>
+                </td>
+                <td class="py-2.5 text-muted-foreground whitespace-nowrap">{{ formatDate(payment.created) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Tax by jurisdiction -->
+        <div v-else-if="activeReport === 'tax'" class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-border">
+                <th class="text-left pb-2.5 text-xs font-medium text-muted-foreground">State</th>
+                <th class="text-right pb-2.5 text-xs font-medium text-muted-foreground">Rate</th>
+                <th class="text-right pb-2.5 text-xs font-medium text-muted-foreground">Collected</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="row in taxRows"
+                :key="row.state"
+                class="border-b border-border last:border-0 hover:bg-muted/30"
+              >
+                <td class="py-2.5 text-foreground">{{ row.state }}</td>
+                <td class="py-2.5 text-right text-muted-foreground">{{ row.rate }}</td>
+                <td class="py-2.5 text-right text-foreground">{{ row.collected }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+      </CardContent>
+    </Card>
 
     <!-- Revenue chart -->
     <Card>
@@ -231,16 +485,37 @@ const totalRevenue = computed(() =>
         <CardDescription>Download your data as CSV for external analysis.</CardDescription>
       </CardHeader>
       <CardContent class="flex flex-wrap gap-3">
-        <Button variant="outline" size="sm">
-          <Receipt class="h-4 w-4" />
+        <Button
+          variant="outline"
+          size="sm"
+          :disabled="exportLoading !== null"
+          class="gap-1.5"
+          @click="exportTransactions"
+        >
+          <Loader2 v-if="exportLoading === 'transactions'" class="h-4 w-4 animate-spin" />
+          <Receipt v-else class="h-4 w-4" />
           Export transactions
         </Button>
-        <Button variant="outline" size="sm">
-          <DollarSign class="h-4 w-4" />
+        <Button
+          variant="outline"
+          size="sm"
+          :disabled="exportLoading !== null"
+          class="gap-1.5"
+          @click="exportPayouts"
+        >
+          <Loader2 v-if="exportLoading === 'payouts'" class="h-4 w-4 animate-spin" />
+          <DollarSign v-else class="h-4 w-4" />
           Export payouts
         </Button>
-        <Button variant="outline" size="sm">
-          <List class="h-4 w-4" />
+        <Button
+          variant="outline"
+          size="sm"
+          :disabled="exportLoading !== null"
+          class="gap-1.5"
+          @click="exportCustomers"
+        >
+          <Loader2 v-if="exportLoading === 'customers'" class="h-4 w-4 animate-spin" />
+          <List v-else class="h-4 w-4" />
           Export customers
         </Button>
       </CardContent>

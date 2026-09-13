@@ -165,6 +165,43 @@ export type CheckoutSession = {
   metadata: Record<string, string>
 }
 
+// ─── Serializers (Stripe response shapes) ─────────────────────────────────────
+
+export function withItems(sub: Subscription) {
+  const { plan } = sub
+  const priceId = plan.id.replace(/^plan_/, 'price_')
+  return {
+    ...sub,
+    items: {
+      object: 'list',
+      data: [
+        {
+          id: `si_${sub.id.replace(/^sub_/, '')}`,
+          object: 'subscription_item',
+          quantity: 1,
+          price: {
+            id: priceId,
+            object: 'price',
+            unit_amount: plan.amount,
+            currency: plan.currency,
+            recurring: { interval: plan.interval, interval_count: plan.interval_count },
+            product: products.find((p) => p.prices.some((pr) => pr.id === priceId))?.id ?? null,
+            nickname: sub.metadata.plan_name ?? null,
+            active: true,
+            created: sub.created,
+          },
+        },
+      ],
+      has_more: false,
+      total_count: 1,
+    },
+  }
+}
+
+export function withAmountReceived(pi: PaymentIntent) {
+  return { ...pi, amount_received: pi.status === 'succeeded' ? pi.amount : 0 }
+}
+
 // ─── Customers ────────────────────────────────────────────────────────────────
 
 export const customers: Customer[] = [
